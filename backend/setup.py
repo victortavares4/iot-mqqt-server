@@ -87,19 +87,21 @@ def run_task_1():
     print("="*60)
     
     try:
-        from iot_device_simulator import IoTDevice, DeviceManager
+        # Importa a versão corrigida do simulador
+        from iot_device_simulator import DeviceManager
         
         print("🚀 Iniciando simulador de dispositivos IoT...")
+        print("💡 AVISO: Esta tarefa rodará por 15 segundos e depois irá parar.")
+        print("💡 Para uma simulação contínua, execute 'python iot_device_simulator.py' diretamente.")
         
-        # Cria dispositivos do cenário
         manager = DeviceManager()
         manager.add_device('TEMP_001', 'temperature')
         manager.add_device('HUM_001', 'humidity')
         manager.add_device('PRES_001', 'pressure')
         
-        # Executa simulação por 15 segundos
-        print("📡 Simulação em execução (15 segundos)...")
-        manager.start_all_devices(interval=3)
+        # Inicia a simulação com segurança ativada por padrão
+        print("📡 Simulação com segurança em execução (15 segundos)...")
+        manager.start_all_devices(interval=3, use_encryption=True, use_hash=True)
         time.sleep(15)
         manager.stop_all_devices()
         

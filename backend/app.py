@@ -9,6 +9,7 @@ import hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
 import os
 import base64
@@ -19,6 +20,19 @@ import logging
 # Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+SHARED_SECRET_PASSWORD = "unisc-iot-security-2025"
+SALT = b'trabalho3-salt'
+
+def get_shared_key():
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=SALT,
+        iterations=100000,
+        backend=default_backend()
+    )
+    return kdf.derive(SHARED_SECRET_PASSWORD.encode())
 
 # Criação da aplicação Flask
 app = Flask(__name__)
@@ -48,20 +62,20 @@ class SecurityManager:
         global symmetric_key, rsa_private_key, rsa_public_key
         
         try:
-            symmetric_key = os.urandom(32)
+            symmetric_key = get_shared_key() 
             rsa_private_key = rsa.generate_private_key(
                 public_exponent=65537,
                 key_size=2048,
                 backend=default_backend()
             )
             rsa_public_key = rsa_private_key.public_key()
-            logger.info("✅ Chaves criptográficas geradas")
+            logger.info("✅ Chaves criptográficas geradas (Chave simétrica compartilhada carregada)")
         except Exception as e:
             logger.error(f"❌ Erro ao gerar chaves: {e}")
     
     def encrypt_aes(self, data, key):
         try:
-            iv = os.urandom(16)
+            iv = os.urandom(12)
             cipher = Cipher(algorithms.AES(key), modes.GCM(iv), backend=default_backend())
             encryptor = cipher.encryptor()
             ciphertext = encryptor.update(data.encode()) + encryptor.finalize()
@@ -73,16 +87,25 @@ class SecurityManager:
     def decrypt_aes(self, encrypted_data, key):
         try:
             encrypted_bytes = base64.b64decode(encrypted_data)
-            iv = encrypted_bytes[:16]
-            tag = encrypted_bytes[16:32]
-            ciphertext = encrypted_bytes[32:]
             
-            cipher = Cipher(algorithms.AES(key), modes.GCM(iv, tag), backend=default_backend())
+            iv = encrypted_bytes[:12]
+            
+            tag = encrypted_bytes[12:28]
+            
+            ciphertext = encrypted_bytes[28:]
+            cipher = Cipher(
+                algorithms.AES(key), 
+                modes.GCM(iv, tag), 
+                backend=default_backend()
+            )
             decryptor = cipher.decryptor()
+            
             plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-            return plaintext.decode()
+            
+            return plaintext.decode('utf-8')
+        
         except Exception as e:
-            logger.error(f"Erro na descriptografia: {e}")
+            logger.error(f"❌ Erro na descriptografia: {e}. Tamanho dos dados recebidos (b64): {len(encrypted_data)}")
             return None
     
     def calculate_hash(self, data):
