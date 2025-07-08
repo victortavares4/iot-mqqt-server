@@ -3,8 +3,7 @@
 Simulador de Dispositivos IoT Corrigido - Trabalho 3 Segurança IoT
 UNISC - Prof. Charles Neu
 
-Este arquivo resolve o problema "[Errno 111] Connection refused"
-Salve como: iot_device_simulator.py
+Este arquivo foi corrigido para usar conexões persistentes e chaves compartilhadas.
 """
 
 import socket
@@ -13,14 +12,32 @@ import json
 import random
 import threading
 import hashlib
-import hmac
 import os
 import base64
 from datetime import datetime
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
+
+# --- Shared Configuration ---
+# AVISO: Em uma aplicação real, não codifique chaves diretamente.
+# Esta chave DEVE ser a mesma definida em app.py
+SHARED_SECRET_PASSWORD = "unisc-iot-security-2025"
+SALT = b'trabalho3-salt'
+
+def get_shared_key():
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=SALT,
+        iterations=100000,
+        backend=default_backend()
+    )
+    return kdf.derive(SHARED_SECRET_PASSWORD.encode())
+
+SHARED_SYMMETRIC_KEY = get_shared_key()
+# --- End Shared Configuration ---
 
 class IoTDevice:
     def __init__(self, device_id, device_type, server_host='127.0.0.1', server_port=65432):
@@ -30,22 +47,16 @@ class IoTDevice:
         self.server_port = server_port
         self.running = False
         self.socket = None
-        self.connection_attempts = 0
         self.max_attempts = 5
         
-        # Chaves de criptografia
-        self.symmetric_key = None
-        self.setup_crypto()
-    
-    def setup_crypto(self):
-        """Configura criptografia"""
-        self.symmetric_key = os.urandom(32)  # 256 bits para AES
-        print(f"[{self.device_id}] 🔐 Criptografia configurada")
+        # Chave de criptografia compartilhada
+        self.symmetric_key = SHARED_SYMMETRIC_KEY
+        print(f"[{self.device_id}] 🔐 Criptografia configurada com chave compartilhada.")
     
     def encrypt_aes(self, data):
         """Criptografia AES-256-GCM"""
         try:
-            iv = os.urandom(16)
+            iv = os.urandom(12)
             cipher = Cipher(
                 algorithms.AES(self.symmetric_key),
                 modes.GCM(iv),
@@ -53,7 +64,8 @@ class IoTDevice:
             )
             encryptor = cipher.encryptor()
             ciphertext = encryptor.update(data.encode()) + encryptor.finalize()
-            return base64.b64encode(iv + encryptor.tag + ciphertext).decode()
+            print(f"[{self.device_id}] 🔐 Dados criptografados com sucesso")
+            return base64.b64encode(iv + encryptor.tag + ciphertext).decode()        
         except Exception as e:
             print(f"[{self.device_id}] ❌ Erro na criptografia: {e}")
             return None
@@ -65,193 +77,121 @@ class IoTDevice:
     def generate_sensor_data(self):
         """Gera dados do sensor baseado no tipo de dispositivo"""
         timestamp = datetime.now().isoformat()
+        data_map = {
+            'temperature': {'value': round(random.uniform(20.0, 30.0), 2), 'unit': 'celsius'},
+            'humidity': {'value': round(random.uniform(40.0, 60.0), 2), 'unit': 'percent'},
+            'pressure': {'value': round(random.uniform(1000.0, 1020.0), 2), 'unit': 'hPa'}
+        }
+        sensor_data = data_map.get(self.device_type, {'value': 0, 'unit': 'N/A'})
         
-        if self.device_type == 'temperature':
-            return {
-                'device_id': self.device_id,
-                'type': 'temperature',
-                'value': round(random.uniform(20.0, 30.0), 2),
-                'unit': 'celsius',
-                'timestamp': timestamp,
-                'battery': round(random.uniform(80.0, 100.0), 1),
-                'signal_strength': random.randint(-70, -30)
-            }
-        elif self.device_type == 'humidity':
-            return {
-                'device_id': self.device_id,
-                'type': 'humidity',
-                'value': round(random.uniform(40.0, 60.0), 2),
-                'unit': 'percent',
-                'timestamp': timestamp,
-                'battery': round(random.uniform(80.0, 100.0), 1),
-                'signal_strength': random.randint(-70, -30)
-            }
-        elif self.device_type == 'pressure':
-            return {
-                'device_id': self.device_id,
-                'type': 'pressure',
-                'value': round(random.uniform(1000.0, 1020.0), 2),
-                'unit': 'hPa',
-                'timestamp': timestamp,
-                'battery': round(random.uniform(80.0, 100.0), 1),
-                'signal_strength': random.randint(-70, -30)
-            }
-        else:
-            return {
-                'device_id': self.device_id,
-                'type': 'generic',
-                'value': round(random.uniform(0.0, 100.0), 2),
-                'timestamp': timestamp,
-                'battery': round(random.uniform(80.0, 100.0), 1)
-            }
+        return {
+            'device_id': self.device_id,
+            'type': self.device_type,
+            'value': sensor_data['value'],
+            'unit': sensor_data['unit'],
+            'timestamp': timestamp,
+            'battery': round(random.uniform(80.0, 100.0), 1)
+        }
     
-    def test_connection(self):
-        """Testa se consegue conectar ao servidor"""
-        try:
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test_socket.settimeout(3)
-            test_socket.connect((self.server_host, self.server_port))
-            test_socket.close()
+    def connect(self):
+        """Estabelece uma conexão persistente com o servidor."""
+        if self.socket:
             return True
-        except:
-            return False
-    
-    def send_data(self, data, use_encryption=False, use_hash=False):
-        """Envia dados para o servidor com retry automático"""
-        if self.connection_attempts >= self.max_attempts:
-            print(f"[{self.device_id}] ❌ Máximo de tentativas excedido")
-            return False
-        
+        print(f"[{self.device_id}] 🔗 Tentando conectar a {self.server_host}:{self.server_port}...")
         try:
-            # Testa conexão primeiro
-            if not self.test_connection():
-                self.connection_attempts += 1
-                print(f"[{self.device_id}] ⚠️  Servidor não disponível (tentativa {self.connection_attempts}/{self.max_attempts})")
-                if self.connection_attempts == 1:
-                    print(f"[{self.device_id}] 💡 SOLUÇÃO: Execute 'python app.py' primeiro!")
-                return False
-            
-            # Conecta ao servidor
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.settimeout(10)
             self.socket.connect((self.server_host, self.server_port))
-            
-            # Prepara dados para envio
+            print(f"[{self.device_id}] ✅ Conectado com sucesso!")
+            return True
+        except Exception as e:
+            print(f"[{self.device_id}] 🔴 Falha ao conectar: {e}")
+            self.socket = None
+            return False
+
+    def disconnect(self):
+        """Fecha a conexão com o servidor."""
+        if self.socket:
+            self.socket.close()
+            self.socket = None
+            print(f"[{self.device_id}] 🔌 Desconectado.")
+
+    def send_packet(self, data, use_encryption=False, use_hash=False):
+        """Prepara e envia um único pacote de dados."""
+        if not self.socket:
+            print(f"[{self.device_id}] ❌ Não conectado. Tentando reconectar...")
+            if not self.connect():
+                return False
+
+        try:
             json_data = json.dumps(data, ensure_ascii=False)
-            
-            # Cria pacote de dados
             packet = {
                 'device_id': self.device_id,
                 'timestamp': datetime.now().isoformat(),
-                'data': json_data,
-                'original_data': json_data
+                'original_data': json_data # Sempre inclui o original para verificação de hash
             }
             
-            # Aplicar criptografia se solicitado
             if use_encryption:
                 encrypted_data = self.encrypt_aes(json_data)
                 if encrypted_data:
                     packet['data'] = encrypted_data
                     packet['encrypted'] = True
-                    print(f"[{self.device_id}] 🔒 Dados criptografados")
                 else:
-                    print(f"[{self.device_id}] ⚠️  Falha na criptografia, enviando sem criptografia")
-            
-            # Aplicar hash se solicitado
+                    packet['data'] = json_data
+                    packet['encrypted'] = False
+            else:
+                packet['data'] = json_data
+                packet['encrypted'] = False
+
             if use_hash:
-                data_hash = self.calculate_hash(json_data)
-                packet['hash'] = data_hash
-                print(f"[{self.device_id}] #️⃣ Hash calculado: {data_hash[:16]}...")
+                packet['hash'] = self.calculate_hash(json_data)
             
-            # Envia dados
+            # Envia o pacote como uma linha de JSON
             packet_json = json.dumps(packet, ensure_ascii=False)
-            self.socket.send(packet_json.encode('utf-8'))
+            self.socket.sendall(packet_json.encode('utf-8'))
             
-            print(f"[{self.device_id}] ✅ Dados enviados: {data.get('type', 'unknown')} = {data.get('value', 'N/A')}")
-            
-            # Reset counter on success
-            self.connection_attempts = 0
+            print(f"[{self.device_id}] ✅ Dados enviados: {data.get('type', 'N/A')} = {data.get('value', 'N/A')}")
             return True
             
-        except ConnectionRefusedError:
-            self.connection_attempts += 1
-            print(f"[{self.device_id}] 🔴 ERRO: Conexão recusada!")
-            print(f"[{self.device_id}] 💡 SOLUÇÃO: Execute 'python app.py' primeiro")
-            print(f"[{self.device_id}] 📊 Tentativa {self.connection_attempts}/{self.max_attempts}")
+        except (socket.error, BrokenPipeError, ConnectionResetError) as e:
+            print(f"[{self.device_id}] ❌ Erro de conexão ao enviar: {e}. Desconectando.")
+            self.disconnect()
             return False
-            
-        except socket.timeout:
-            self.connection_attempts += 1
-            print(f"[{self.device_id}] ⏱️  Timeout na conexão (tentativa {self.connection_attempts}/{self.max_attempts})")
-            return False
-            
         except Exception as e:
-            self.connection_attempts += 1
-            print(f"[{self.device_id}] ❌ Erro ao enviar dados: {e}")
-            print(f"[{self.device_id}] 📊 Tentativa {self.connection_attempts}/{self.max_attempts}")
+            print(f"[{self.device_id}] ❌ Erro inesperado ao enviar dados: {e}")
+            self.disconnect()
             return False
-            
-        finally:
-            if self.socket:
-                try:
-                    self.socket.close()
-                except:
-                    pass
-    
-    def start_simulation(self, interval=2, use_encryption=False, use_hash=False, max_iterations=None):
-        """Inicia simulação contínua"""
+
+    def start_simulation(self, interval=5, use_encryption=False, use_hash=False, max_iterations=None):
+        """Inicia simulação contínua com conexão persistente."""
         self.running = True
-        self.connection_attempts = 0
         iteration = 0
         
-        print(f"[{self.device_id}] 🚀 Simulação iniciada")
-        print(f"[{self.device_id}] 📡 Servidor: {self.server_host}:{self.server_port}")
-        print(f"[{self.device_id}] ⏱️  Intervalo: {interval}s")
-        print(f"[{self.device_id}] 🔐 Criptografia: {'Sim' if use_encryption else 'Não'}")
-        print(f"[{self.device_id}] #️⃣ Hash: {'Sim' if use_hash else 'Não'}")
+        print(f"[{self.device_id}] 🚀 Simulação iniciada (Intervalo: {interval}s, Cripto: {'Sim' if use_encryption else 'Não'})")
         
+        if not self.connect():
+            self.running = False
+            print(f"[{self.device_id}] 🛑 Parando simulação, falha na conexão inicial.")
+            return
+
         while self.running:
-            try:
-                # Verifica limite de iterações
-                if max_iterations and iteration >= max_iterations:
-                    print(f"[{self.device_id}] 🏁 Limite de iterações atingido ({max_iterations})")
-                    break
-                
-                # Verifica se excedeu tentativas
-                if self.connection_attempts >= self.max_attempts:
-                    print(f"[{self.device_id}] 🛑 Parando devido a muitas falhas de conexão")
-                    print(f"[{self.device_id}] 💡 Execute 'python app.py' e tente novamente")
-                    break
-                
-                # Gera dados do sensor
-                sensor_data = self.generate_sensor_data()
-                
-                # Envia dados
-                success = self.send_data(sensor_data, use_encryption, use_hash)
-                
-                if not success:
-                    # Aguarda mais tempo em caso de falha
-                    wait_time = interval * (self.connection_attempts + 1)
-                    print(f"[{self.device_id}] ⏳ Aguardando {wait_time}s antes da próxima tentativa...")
-                    time.sleep(wait_time)
-                else:
-                    # Aguarda intervalo normal
-                    time.sleep(interval)
-                
-                iteration += 1
-                
-            except KeyboardInterrupt:
-                print(f"[{self.device_id}] 🛑 Simulação interrompida pelo usuário")
-                self.running = False
+            if max_iterations and iteration >= max_iterations:
+                print(f"[{self.device_id}] 🏁 Limite de iterações atingido.")
                 break
-            except Exception as e:
-                print(f"[{self.device_id}] ❌ Erro na simulação: {e}")
-                time.sleep(interval * 2)
+            
+            sensor_data = self.generate_sensor_data()
+            if not self.send_packet(sensor_data, use_encryption, use_hash):
+                # Se falhou, aguarda um pouco antes de tentar reconectar no próximo loop
+                time.sleep(5)
+            
+            iteration += 1
+            time.sleep(interval)
         
+        self.disconnect()
         print(f"[{self.device_id}] 🏁 Simulação finalizada")
-    
+
     def stop_simulation(self):
-        """Para a simulação"""
+        """Para a simulação."""
         self.running = False
 
 class DeviceManager:
